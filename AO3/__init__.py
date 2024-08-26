@@ -1,7 +1,7 @@
 from . import extra, utils
 from .chapters import Chapter
 from .comments import Comment
-from .search import Search
+from .search import Search, SearchQuery
 from .series import Series
 from .session import GuestSession, Session
 from .users import User

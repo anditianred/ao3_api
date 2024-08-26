@@ -9,6 +9,21 @@ from .series import Series
 from .users import User
 from .works import Work
 
+import shelve
+import os
+import re
+import datetime
+import pathlib
+import hashlib
+import dataclasses
+import json
+from collections.abc import Collection
+
+from typing import TYPE_CHECKING, Optional
+if TYPE_CHECKING:
+    from .session import Session
+    from .utils import Constraint
+
 DEFAULT = "_score"
 BEST_MATCH = "_score"
 AUTHOR = "authors_to_sort_on"
@@ -25,8 +40,47 @@ KUDOS = "kudos_count"
 DESCENDING = "desc"
 ASCENDING = "asc"
 
+DIR = pathlib.Path(__file__).parent.resolve()
+CACHE_PAGES_DIR = DIR / "search_cache"
+CACHE_INDEX = CACHE_PAGES_DIR / "search_cache_index"
 
-class Search:
+CACHE_PAGES_DIR.mkdir(parents=True, exist_ok=True)
+if not CACHE_INDEX.is_file():
+    with shelve.open(CACHE_INDEX) as f:
+        f["dummy"] = "test"
+
+TIME_FMT = "%m/%d/%Y %H:%M:%S"
+
+# cache table
+# hash(search query, page), entry = file name, query time/date (if time/date > week then need re search)
+# file - soup result stored
+# CACHE_INDEX file contains mapping of hash to entry
+@dataclasses.dataclass
+class SearchQuery:
+    any_field: str
+    title: str
+    author: str
+    single_chapter: bool
+    word_count: Optional["Constraint"]
+    language: str
+    fandoms: str
+    rating: Optional["Constraint"]
+    hits: Optional["Constraint"]
+    kudos: Optional["Constraint"]
+    crossovers: Optional[bool]
+    bookmarks: Optional["Constraint"]
+    excluded_tags: str
+    comments: Optional["Constraint"]
+    completion_status: Optional[bool]
+    page: int
+    sort_column: str
+    sort_direction: str
+    revised_at: str
+    characters: str
+    relationships: str
+    tags: str
+    guest: bool
+
     def __init__(
         self,
         any_field="",
@@ -51,7 +105,7 @@ class Search:
         characters="",
         relationships="",
         tags="",
-        session=None):
+        guest=True):
 
         self.any_field = any_field
         self.title = title
@@ -75,25 +129,64 @@ class Search:
         self.sort_column = sort_column
         self.sort_direction = sort_direction
         self.revised_at = revised_at
-        
+        self.guest = guest
+
+class Search:
+    def __init__(
+        self, search_query: SearchQuery, session=None):
+
+        self.search_query = search_query
+        if session:
+            self.search_query.guest = False
+
         self.session = session
 
         self.results = None
         self.pages = 0
         self.total_results = 0
 
+    def get_hash(self) -> str:
+        print(json_dumps(self.search_query))
+        return hashlib.md5(json_dumps(self.search_query).encode('utf-8')).hexdigest()
+    
+    def load_cache(self) -> Optional[BeautifulSoup]:
+        search_hash = self.get_hash()
+        filename = os.path.join(CACHE_PAGES_DIR, f"{search_hash}.html")
+        cache_hit = False
+        with shelve.open(CACHE_INDEX) as f:
+            if search_hash in f:
+                # check last search time
+                cache_hit = True
+                print("CACHE HIT")
+        soup = None
+        if cache_hit:
+            with open(filename, "r", encoding="utf-8") as f:
+                soup = BeautifulSoup(f.read(), "lxml")
+        return soup
+
+        
+
+
     @threadable.threadable
     def update(self):
         """Sends a request to the AO3 website with the defined search parameters, and updates all info.
         This function is threadable.
         """
+        search_hash = self.get_hash()
+        filename = os.path.join(CACHE_PAGES_DIR, f"{search_hash}.html")
+        soup = self.load_cache()
+        if soup is None:
+            print("CACHE MISS")
+            soup = search(self.search_query)
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(str(soup))
+            with shelve.open(CACHE_INDEX) as f:
+                f[search_hash] = datetime.datetime.now().strftime(TIME_FMT)
 
-        soup = search(
-            self.any_field, self.title, self.author, self.single_chapter,
-            self.word_count, self.language, self.fandoms, self.rating, self.hits,
-            self.kudos, self.crossovers, self.bookmarks, self.excluded_tags, self.comments, self.completion_status, self.page,
-            self.sort_column, self.sort_direction, self.revised_at, self.session,
-            self.characters, self.relationships, self.tags)
+        
+
+        
+
 
         results = soup.find("ol", {"class": ("work", "index", "group")})
         if results is None and soup.find("p", text="No results found. You may want to edit your search to make it less specific.") is not None:
@@ -116,30 +209,7 @@ class Search:
         self.total_results = int(maindiv.find("h3", {"class": "heading"}).getText().replace(',','').replace('.','').strip().split(" ")[0])
         self.pages = ceil(self.total_results / 20)
 
-def search(
-    any_field="",
-    title="",
-    author="",
-    single_chapter=False,
-    word_count=None,
-    language="",
-    fandoms="",
-    rating=None,
-    hits=None,
-    kudos=None,
-    crossovers=None,
-    bookmarks=None,
-    excluded_tags="",
-    comments=None,
-    completion_status=None,
-    page=1,
-    sort_column="",
-    sort_direction="",
-    revised_at="",
-    session=None,
-    characters="",
-    relationships="",
-    tags=""):
+def search(search_query: SearchQuery, session=None):
     """Returns the results page for the search as a Soup object
 
     Args:
@@ -171,49 +241,49 @@ def search(
     """
 
     query = utils.Query()
-    query.add_field(f"work_search[query]={any_field if any_field != '' else ' '}")
-    if page != 1:
-        query.add_field(f"page={page}")
-    if title != "":
-        query.add_field(f"work_search[title]={title}")
-    if author != "":
-        query.add_field(f"work_search[creators]={author}")
-    if single_chapter:
+    query.add_field(f"work_search[query]={search_query.any_field if search_query.any_field != '' else ' '}")
+    if search_query.page != 1:
+        query.add_field(f"page={search_query.page}")
+    if search_query.title != "":
+        query.add_field(f"work_search[title]={search_query.title}")
+    if search_query.author != "":
+        query.add_field(f"work_search[creators]={search_query.author}")
+    if search_query.single_chapter:
         query.add_field(f"work_search[single_chapter]=1")
-    if word_count is not None:
-        query.add_field(f"work_search[word_count]={word_count}")
-    if language != "":
-        query.add_field(f"work_search[language_id]={language}")
-    if fandoms != "":
-        query.add_field(f"work_search[fandom_names]={fandoms}")
-    if characters != "":
-        query.add_field(f"work_search[character_names]={characters}")
-    if relationships != "":
-        query.add_field(f"work_search[relationship_names]={relationships}")
-    if tags != "":
-        query.add_field(f"work_search[freeform_names]={tags}")
-    if rating is not None:
-        query.add_field(f"work_search[rating_ids]={rating}")
-    if hits is not None:
-        query.add_field(f"work_search[hits]={hits}")
-    if kudos is not None:
-        query.add_field(f"work_search[kudos_count]={kudos}")
-    if crossovers is not None:
-        query.add_field(f"work_search[crossover]={'T' if crossovers else 'F'}")
-    if bookmarks is not None:
-        query.add_field(f"work_search[bookmarks_count]={bookmarks}")
-    if excluded_tags != "":
-        query.add_field(f"work_search[excluded_tag_names]={excluded_tags}")
-    if comments is not None:
-        query.add_field(f"work_search[comments_count]={comments}")
-    if completion_status is not None:
-        query.add_field(f"work_search[complete]={'T' if completion_status else 'F'}")
-    if sort_column != "":
-        query.add_field(f"work_search[sort_column]={sort_column}")
-    if sort_direction != "":
-        query.add_field(f"work_search[sort_direction]={sort_direction}")
-    if revised_at != "":
-        query.add_field(f"work_search[revised_at]={revised_at}")
+    if search_query.word_count is not None:
+        query.add_field(f"work_search[word_count]={search_query.word_count}")
+    if search_query.language != "":
+        query.add_field(f"work_search[language_id]={search_query.language}")
+    if search_query.fandoms != "":
+        query.add_field(f"work_search[fandom_names]={search_query.fandoms}")
+    if search_query.characters != "":
+        query.add_field(f"work_search[character_names]={search_query.characters}")
+    if search_query.relationships != "":
+        query.add_field(f"work_search[relationship_names]={search_query.relationships}")
+    if search_query.tags != "":
+        query.add_field(f"work_search[freeform_names]={search_query.tags}")
+    if search_query.rating is not None:
+        query.add_field(f"work_search[rating_ids]={search_query.rating}")
+    if search_query.hits is not None:
+        query.add_field(f"work_search[hits]={search_query.hits}")
+    if search_query.kudos is not None:
+        query.add_field(f"work_search[kudos_count]={search_query.kudos}")
+    if search_query.crossovers is not None:
+        query.add_field(f"work_search[crossover]={'T' if search_query.crossovers else 'F'}")
+    if search_query.bookmarks is not None:
+        query.add_field(f"work_search[bookmarks_count]={search_query.bookmarks}")
+    if search_query.excluded_tags != "":
+        query.add_field(f"work_search[excluded_tag_names]={search_query.excluded_tags}")
+    if search_query.comments is not None:
+        query.add_field(f"work_search[comments_count]={search_query.comments}")
+    if search_query.completion_status is not None:
+        query.add_field(f"work_search[complete]={'T' if search_query.completion_status else 'F'}")
+    if search_query.sort_column != "":
+        query.add_field(f"work_search[sort_column]={search_query.sort_column}")
+    if search_query.sort_direction != "":
+        query.add_field(f"work_search[sort_direction]={search_query.sort_direction}")
+    if search_query.revised_at != "":
+        query.add_field(f"work_search[revised_at]={search_query.revised_at}")
 
     url = f"https://archiveofourown.org/works/search?{query.string}"
 
@@ -225,3 +295,34 @@ def search(
         raise utils.HTTPError("We are being rate-limited. Try again in a while or reduce the number of requests")
     soup = BeautifulSoup(req.content, features="lxml")
     return soup
+
+def dict_drop_empty(pairs):
+    return dict(
+        (k, v)
+        for k, v in pairs
+        if not (
+            v is None
+            or not v and isinstance(v, Collection)
+        )
+    )
+
+def json_default(thing):
+    try:
+        return dataclasses.asdict(thing, dict_factory=dict_drop_empty)
+    except TypeError:
+        pass
+    if isinstance(thing, datetime.datetime):
+        return thing.isoformat(timespec='microseconds')
+    raise TypeError(f"object of type {type(thing).__name__} not serializable")
+
+def json_dumps(thing: SearchQuery):
+    return json.dumps(
+        thing,
+        default=json_default,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=None,
+        separators=(',', ':'),
+    )
+
+
