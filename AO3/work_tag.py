@@ -15,7 +15,7 @@ class WorkTags:
         self.tags = set(tags)
         self.sectioned_tags = sectioned_tags
 
-def parse_worktags_from_html(soup: BeautifulSoup, debug: bool = False) -> list[WorkTags]:
+def parse_worktags_from_soup(soup: BeautifulSoup, debug: bool = False) -> list[WorkTags]:
     results = soup.find("ol", {"class": ("work", "index", "group")})
     if results is None:
         return
@@ -44,5 +44,4 @@ def parse_worktags_from_html(soup: BeautifulSoup, debug: bool = False) -> list[W
                 for tag in sec:
                     print(f"{tag.type}: {tag.name}")
                 
-    print(len(works))
     return works

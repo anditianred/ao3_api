@@ -42,3 +42,7 @@ def find_tag_in_soup(tag_name: str, soup: BeautifulSoup) -> Optional[Tag]:
         return
     tag_type = list_items[0].find_parent().get("class")[0] # TODO: check if found
     return Tag(name=tag_name, tag_type=TagType(tag_type))
+
+
+
+# TODO: create relationship tag class?
